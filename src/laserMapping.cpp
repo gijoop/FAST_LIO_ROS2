@@ -102,7 +102,7 @@ bool    is_first_lidar = true;
 bool   publish_tf = true;
 string odom_frame = "camera_init";
 string lidar_frame = "body";
-vector<double> lidar_pose(3, 0.0);
+vector<double> lidar_pos(3, 0.0);
 vector<double> lidar_rot(4, 0.0);
 
 vector<vector<int>>  pointSearchInd_surf; 
@@ -727,7 +727,7 @@ void publish_odometry(const rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPt
     odomAftMapped.child_frame_id = lidar_frame;
     odomAftMapped.header.stamp = get_ros_time(lidar_end_time);
     set_posestamp(odomAftMapped.pose);
-    transform_pose(odomAftMapped.pose, pos_offset, rot_offset);
+    transform_pose(odomAftMapped.pose, lidar_pos, lidar_rot);
     pubOdomAftMapped->publish(odomAftMapped);
     auto P = kf.get_P();
     for (int i = 0; i < 6; i ++)
@@ -959,8 +959,8 @@ public:
         this->get_parameter_or<bool>("common.publish_tf", publish_tf, true);
         this->get_parameter_or<string>("common.odom_frame", odom_frame, "camera_init");
         this->get_parameter_or<string>("common.lidar_frame", lidar_frame, "body");
-        this->get_parameter_or<vector<double>>("common.lidar_pose", lidar_pos_vec, vector<double>{0.0, 0.0, 0.0});
-        this->get_parameter_or<vector<double>>("common.lidar_rot", lidar_rot_vec, vector<double>{0.0, 0.0, 0.0, 0.0});
+        this->get_parameter_or<vector<double>>("common.lidar_pose", lidar_pos, vector<double>{0.0, 0.0, 0.0});
+        this->get_parameter_or<vector<double>>("common.lidar_rot", lidar_rot, vector<double>{0.0, 0.0, 0.0, 0.0});
         this->get_parameter_or<double>("filter_size_corner",filter_size_corner_min,0.5);
         this->get_parameter_or<double>("filter_size_surf",filter_size_surf_min,0.5);
         this->get_parameter_or<double>("filter_size_map",filter_size_map_min,0.5);
