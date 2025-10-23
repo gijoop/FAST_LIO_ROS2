@@ -99,6 +99,12 @@ bool   lidar_pushed, flg_first_scan = true, flg_exit = false, flg_EKF_inited;
 bool   scan_pub_en = false, dense_pub_en = false, scan_body_pub_en = false;
 bool    is_first_lidar = true;
 
+bool   publish_tf = true;
+string odom_frame = "camera_init";
+string base_frame = "body";
+vector<double> lidar_pose(3, 0.0);
+vector<double> lidar_rot(4, 0.0);
+
 vector<vector<int>>  pointSearchInd_surf; 
 vector<BoxPointType> cub_needrm;
 vector<PointVector>  Nearest_Points; 
@@ -505,7 +511,7 @@ void publish_frame_world(rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::Share
         pcl::toROSMsg(*laserCloudWorld, laserCloudmsg);
         // laserCloudmsg.header.stamp = ros::Time().fromSec(lidar_end_time);
         laserCloudmsg.header.stamp = get_ros_time(lidar_end_time);
-        laserCloudmsg.header.frame_id = "camera_init";
+        laserCloudmsg.header.frame_id = odom_frame;
         pubLaserCloudFull->publish(laserCloudmsg);
         publish_count -= PUBFRAME_PERIOD;
     }
@@ -557,9 +563,44 @@ void publish_frame_body(rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::Shared
     sensor_msgs::msg::PointCloud2 laserCloudmsg;
     pcl::toROSMsg(*laserCloudIMUBody, laserCloudmsg);
     laserCloudmsg.header.stamp = get_ros_time(lidar_end_time);
-    laserCloudmsg.header.frame_id = "body";
+    laserCloudmsg.header.frame_id = base_frame;
     pubLaserCloudFull_body->publish(laserCloudmsg);
     publish_count -= PUBFRAME_PERIOD;
+}
+
+void publish_frame_custom(rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr pubLaserCloudCustom, 
+                         const std::string& frame_id, 
+                         bool transform_to_world = false)
+{
+    if(scan_pub_en)
+    {
+        PointCloudXYZI::Ptr laserCloudToPublish;
+        
+        if (transform_to_world)
+        {
+            // Transform points to world frame
+            PointCloudXYZI::Ptr laserCloudSource(dense_pub_en ? feats_undistort : feats_down_body);
+            int size = laserCloudSource->points.size();
+            laserCloudToPublish.reset(new PointCloudXYZI(size, 1));
+            
+            for (int i = 0; i < size; i++)
+            {
+                RGBpointBodyToWorld(&laserCloudSource->points[i], 
+                                  &laserCloudToPublish->points[i]);
+            }
+        }
+        else
+        {
+            // Use points in original lidar frame
+            laserCloudToPublish = dense_pub_en ? feats_undistort : feats_down_body;
+        }
+        
+        sensor_msgs::msg::PointCloud2 laserCloudmsg;
+        pcl::toROSMsg(*laserCloudToPublish, laserCloudmsg);
+        laserCloudmsg.header.stamp = get_ros_time(lidar_end_time);
+        laserCloudmsg.header.frame_id = frame_id;  // Use custom frame ID
+        pubLaserCloudCustom->publish(laserCloudmsg);
+    }
 }
 
 void publish_effect_world(rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr pubLaserCloudEffect)
@@ -574,7 +615,7 @@ void publish_effect_world(rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::Shar
     sensor_msgs::msg::PointCloud2 laserCloudFullRes3;
     pcl::toROSMsg(*laserCloudWorld, laserCloudFullRes3);
     laserCloudFullRes3.header.stamp = get_ros_time(lidar_end_time);
-    laserCloudFullRes3.header.frame_id = "camera_init";
+    laserCloudFullRes3.header.frame_id = odom_frame;
     pubLaserCloudEffect->publish(laserCloudFullRes3);
 }
 
@@ -596,7 +637,7 @@ void publish_map(rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr pub
     pcl::toROSMsg(*pcl_wait_pub, laserCloudmsg);
     // laserCloudmsg.header.stamp = ros::Time().fromSec(lidar_end_time);
     laserCloudmsg.header.stamp = get_ros_time(lidar_end_time);
-    laserCloudmsg.header.frame_id = "camera_init";
+    laserCloudmsg.header.frame_id = odom_frame;
     pubLaserCloudMap->publish(laserCloudmsg);
 
     // sensor_msgs::msg::PointCloud2 laserCloudMap;
@@ -611,6 +652,61 @@ void save_to_pcd()
     pcl::PCDWriter pcd_writer;
     pcd_writer.writeBinary(map_file_path, *pcl_wait_pub);
 }
+
+/**
+ * Transform pose by given position and rotation offsets
+ * 
+ * @param[in,out] in The input pose to be transformed
+ * @param[in] pos_offset The position offset as a vector of 3 doubles [dx, dy, dz]
+ * @param[in] rot_offset The rotation offset as a quaternion vector of 4 doubles [qw, qx, qy, qz]
+ * 
+ * @example
+ * Lets say we have an outside tf tree with odom->base_link
+ * This software uses camera_init->body as its internal tf tree
+ * Let's also say we have a static lidar_link frame connected to base_link, where the lidar is located
+ * We want to transform the pose from camera_init->body to odom->lidar_link
+ * We can achieve this by applying the following offsets:
+ * - pos_offset: The translation vector from base_link to lidar_link in base_link frame
+ * - rot_offset: The rotation quaternion from base_link to lidar_link
+ * By applying these offsets using this function, we effectively transform the pose from camera_init->body to odom->lidar_link
+ * 
+ */
+template<typename T>
+void transform_pose(T& in, const std::vector<double>& pos_offset, const std::vector<double>& rot_offset)
+{
+    Eigen::Vector3d pos_in(in.pose.position.x, in.pose.position.y, in.pose.position.z);
+    Eigen::Quaterniond quat_in(
+        in.pose.orientation.w,
+        in.pose.orientation.x,
+        in.pose.orientation.y,
+        in.pose.orientation.z
+    );
+
+    Eigen::Quaterniond quat_offset(
+        rot_offset[3], // note order: w, x, y, z for Eigen ctor
+        rot_offset[0],
+        rot_offset[1],
+        rot_offset[2]
+    );
+    Eigen::Vector3d t_offset(pos_offset[0], pos_offset[1], pos_offset[2]);
+
+    Eigen::Quaterniond quat_inv = quat_offset.conjugate();
+    Eigen::Vector3d t_inv = -(quat_inv * t_offset);
+
+    // T(world->base) = T(world->lidar) * T(lidar->base)
+    Eigen::Quaterniond quat_out = quat_in * quat_inv;
+    quat_out.normalize();
+    Eigen::Vector3d pos_out = pos_in + quat_in * t_inv;
+
+    in.pose.position.x = pos_out.x();
+    in.pose.position.y = pos_out.y();
+    in.pose.position.z = pos_out.z();
+    in.pose.orientation.w = quat_out.w();
+    in.pose.orientation.x = quat_out.x();
+    in.pose.orientation.y = quat_out.y();
+    in.pose.orientation.z = quat_out.z();
+}
+
 
 template<typename T>
 void set_posestamp(T & out)
@@ -627,10 +723,11 @@ void set_posestamp(T & out)
 
 void publish_odometry(const rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPtr pubOdomAftMapped, std::unique_ptr<tf2_ros::TransformBroadcaster> & tf_br)
 {
-    odomAftMapped.header.frame_id = "camera_init";
-    odomAftMapped.child_frame_id = "body";
+    odomAftMapped.header.frame_id = odom_frame;
+    odomAftMapped.child_frame_id = base_frame;
     odomAftMapped.header.stamp = get_ros_time(lidar_end_time);
     set_posestamp(odomAftMapped.pose);
+    transform_pose(odomAftMapped.pose, pos_offset, rot_offset);
     pubOdomAftMapped->publish(odomAftMapped);
     auto P = kf.get_P();
     for (int i = 0; i < 6; i ++)
@@ -644,10 +741,12 @@ void publish_odometry(const rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPt
         odomAftMapped.pose.covariance[i*6 + 5] = P(k, 2);
     }
 
+    if (!publish_tf) return;
+
     geometry_msgs::msg::TransformStamped trans;
-    trans.header.frame_id = "camera_init";
+    trans.header.frame_id = odom_frame;
     trans.header.stamp = odomAftMapped.header.stamp;
-    trans.child_frame_id = "body";
+    trans.child_frame_id = base_frame;
     trans.transform.translation.x = odomAftMapped.pose.pose.position.x;
     trans.transform.translation.y = odomAftMapped.pose.pose.position.y;
     trans.transform.translation.z = odomAftMapped.pose.pose.position.z;
@@ -662,7 +761,7 @@ void publish_path(rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr pubPath)
 {
     set_posestamp(msg_body_pose);
     msg_body_pose.header.stamp = get_ros_time(lidar_end_time); // ros::Time().fromSec(lidar_end_time);
-    msg_body_pose.header.frame_id = "camera_init";
+    msg_body_pose.header.frame_id = odom_frame;
 
     /*** if path is too large, the rvis will crash ***/
     static int jjj = 0;
@@ -810,6 +909,11 @@ public:
         this->declare_parameter<string>("common.imu_topic", "/livox/imu");
         this->declare_parameter<bool>("common.time_sync_en", false);
         this->declare_parameter<double>("common.time_offset_lidar_to_imu", 0.0);
+        this->declare_parameter<bool>("common.publish_tf", true);
+        this->declare_parameter<string>("common.odom_frame", "camera_init");
+        this->declare_parameter<string>("common.base_frame", "body");
+        this->declare_parameter<vector<double>>("common.lidar_pose", vector<double>{0.0, 0.0, 0.0});
+        this->declare_parameter<vector<double>>("common.lidar_rot", vector<double>{0.0, 0.0, 0.0, 0.0});
         this->declare_parameter<double>("filter_size_corner", 0.5);
         this->declare_parameter<double>("filter_size_surf", 0.5);
         this->declare_parameter<double>("filter_size_map", 0.5);
@@ -833,6 +937,12 @@ public:
         this->declare_parameter<int>("pcd_save.interval", -1);
         this->declare_parameter<vector<double>>("mapping.extrinsic_T", vector<double>());
         this->declare_parameter<vector<double>>("mapping.extrinsic_R", vector<double>());
+        
+        // Custom frame ID parameters
+        this->declare_parameter<string>("publish.custom_frame_id", "lidar_link");
+        this->declare_parameter<string>("publish.custom_topic_name", "/cloud_custom_frame");
+        this->declare_parameter<bool>("publish.custom_transform_to_world", false);
+        this->declare_parameter<bool>("publish.custom_enable", true);
 
         this->get_parameter_or<bool>("publish.path_en", path_en, true);
         this->get_parameter_or<bool>("publish.effect_map_en", effect_pub_en, false);
@@ -846,6 +956,11 @@ public:
         this->get_parameter_or<string>("common.imu_topic", imu_topic,"/livox/imu");
         this->get_parameter_or<bool>("common.time_sync_en", time_sync_en, false);
         this->get_parameter_or<double>("common.time_offset_lidar_to_imu", time_diff_lidar_to_imu, 0.0);
+        this->get_parameter_or<bool>("common.publish_tf", publish_tf, true);
+        this->get_parameter_or<string>("common.odom_frame", odom_frame, "camera_init");
+        this->get_parameter_or<string>("common.base_frame", base_frame, "body");
+        this->get_parameter_or<vector<double>>("common.lidar_pose", lidar_pos_vec, vector<double>{0.0, 0.0, 0.0});
+        this->get_parameter_or<vector<double>>("common.lidar_rot", lidar_rot_vec, vector<double>{0.0, 0.0, 0.0, 0.0});
         this->get_parameter_or<double>("filter_size_corner",filter_size_corner_min,0.5);
         this->get_parameter_or<double>("filter_size_surf",filter_size_surf_min,0.5);
         this->get_parameter_or<double>("filter_size_map",filter_size_map_min,0.5);
@@ -870,10 +985,23 @@ public:
         this->get_parameter_or<vector<double>>("mapping.extrinsic_T", extrinT, vector<double>());
         this->get_parameter_or<vector<double>>("mapping.extrinsic_R", extrinR, vector<double>());
 
+        // Get custom frame parameters
+        string custom_frame_id, custom_topic_name;
+        bool custom_transform_to_world, custom_enable;
+        this->get_parameter_or<string>("publish.custom_frame_id", custom_frame_id, "lidar_link");
+        this->get_parameter_or<string>("publish.custom_topic_name", custom_topic_name, "/cloud_custom_frame");
+        this->get_parameter_or<bool>("publish.custom_transform_to_world", custom_transform_to_world, false);
+        this->get_parameter_or<bool>("publish.custom_enable", custom_enable, true);
+
+        // Store as member variables
+        custom_frame_id_ = custom_frame_id;
+        custom_transform_to_world_ = custom_transform_to_world;
+        custom_enable_ = custom_enable;
+
         RCLCPP_INFO(this->get_logger(), "p_pre->lidar_type %d", p_pre->lidar_type);
 
         path.header.stamp = this->get_clock()->now();
-        path.header.frame_id ="camera_init";
+        path.header.frame_id = odom_frame;
 
         // /*** variables definition ***/
         // int effect_feat_num = 0, frame_num = 0;
@@ -933,6 +1061,12 @@ public:
         pubLaserCloudMap_ = this->create_publisher<sensor_msgs::msg::PointCloud2>("/Laser_map", 20);
         pubOdomAftMapped_ = this->create_publisher<nav_msgs::msg::Odometry>("/Odometry", 20);
         pubPath_ = this->create_publisher<nav_msgs::msg::Path>("/path", 20);
+        
+        // Create custom publisher
+        if (custom_enable_) {
+            pubLaserCloudCustom_ = this->create_publisher<sensor_msgs::msg::PointCloud2>(custom_topic_name, 20);
+        }
+        
         tf_broadcaster_ = std::make_unique<tf2_ros::TransformBroadcaster>(*this);
 
         //------------------------------------------------------------------------------------------------------
@@ -1075,6 +1209,11 @@ private:
             if (effect_pub_en) publish_effect_world(pubLaserCloudEffect_);
             // if (map_pub_en) publish_map(pubLaserCloudMap_);
 
+            // Publish custom frame if enabled
+            if (custom_enable_) {
+                publish_frame_custom(pubLaserCloudCustom_, custom_frame_id_, custom_transform_to_world_);
+            }
+
             /*** Debug variables ***/
             if (runtime_pos_log)
             {
@@ -1152,6 +1291,12 @@ private:
 
     FILE *fp;
     ofstream fout_pre, fout_out, fout_dbg;
+
+    // Custom frame parameters
+    string custom_frame_id_;
+    bool custom_transform_to_world_;
+    bool custom_enable_;
+    rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr pubLaserCloudCustom_;
 };
 
 int main(int argc, char** argv)
