@@ -14,7 +14,7 @@
             odom_frame: "camera_init"
             lidar_frame: "body"
             lidar_pose: [ 0.0, 0.0, 0.0 ] # Lidar to base_frame translation
-            lidar_rot:  [ 0.0, 0.0, 0.0, 0.0 ] # Lidar to base_frame rotation (quaternion x,y,z,w)
+            lidar_rot:  [ 0.0, 0.0, 0.0, 1.0 ] # Lidar to base_frame rotation (quaternion x,y,z,w)
             lid_topic:  "/livox/lidar"
             imu_topic:  "/livox/imu"
             time_sync_en: false         # ONLY turn on when external time synchronization is really not possible
