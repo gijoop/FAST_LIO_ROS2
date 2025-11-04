@@ -1116,7 +1116,7 @@ private:
 
             if (feats_undistort->empty() || (feats_undistort == NULL))
             {
-                RCLCPP_WARN(this->get_logger(), "No point, skip this scan!\n");
+                RCLCPP_DEBUG(this->get_logger(), "No point, skip this scan!\n");
                 return;
             }
 
@@ -1154,7 +1154,7 @@ private:
             /*** ICP and iterated Kalman filter update ***/
             if (feats_down_size < 5)
             {
-                RCLCPP_WARN(this->get_logger(), "No point, skip this scan!\n");
+                RCLCPP_DEBUG(this->get_logger(), "No point, skip this scan!\n");
                 return;
             }
             
