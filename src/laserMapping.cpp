@@ -568,41 +568,6 @@ void publish_frame_body(rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::Shared
     publish_count -= PUBFRAME_PERIOD;
 }
 
-void publish_frame_custom(rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr pubLaserCloudCustom, 
-                         const std::string& frame_id, 
-                         bool transform_to_world = false)
-{
-    if(scan_pub_en)
-    {
-        PointCloudXYZI::Ptr laserCloudToPublish;
-        
-        if (transform_to_world)
-        {
-            // Transform points to world frame
-            PointCloudXYZI::Ptr laserCloudSource(dense_pub_en ? feats_undistort : feats_down_body);
-            int size = laserCloudSource->points.size();
-            laserCloudToPublish.reset(new PointCloudXYZI(size, 1));
-            
-            for (int i = 0; i < size; i++)
-            {
-                RGBpointBodyToWorld(&laserCloudSource->points[i], 
-                                  &laserCloudToPublish->points[i]);
-            }
-        }
-        else
-        {
-            // Use points in original lidar frame
-            laserCloudToPublish = dense_pub_en ? feats_undistort : feats_down_body;
-        }
-        
-        sensor_msgs::msg::PointCloud2 laserCloudmsg;
-        pcl::toROSMsg(*laserCloudToPublish, laserCloudmsg);
-        laserCloudmsg.header.stamp = get_ros_time(lidar_end_time);
-        laserCloudmsg.header.frame_id = frame_id;  // Use custom frame ID
-        pubLaserCloudCustom->publish(laserCloudmsg);
-    }
-}
-
 void publish_effect_world(rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr pubLaserCloudEffect)
 {
     PointCloudXYZI::Ptr laserCloudWorld( \
@@ -653,33 +618,14 @@ void save_to_pcd()
     pcd_writer.writeBinary(map_file_path, *pcl_wait_pub);
 }
 
-/**
- * Transform pose by given position and rotation offsets
- * 
- * @param[in,out] in The input pose to be transformed
- * @param[in] pos_offset The position offset as a vector of 3 doubles [dx, dy, dz]
- * @param[in] rot_offset The rotation offset as a quaternion vector of 4 doubles [qw, qx, qy, qz]
- * 
- * @example
- * Lets say we have an outside tf tree with odom->base_link
- * This software uses camera_init->body as its internal tf tree
- * Let's also say we have a static lidar_link frame connected to base_link, where the lidar is located
- * We want to transform the pose from camera_init->body to odom->lidar_link
- * We can achieve this by applying the following offsets:
- * - pos_offset: The translation vector from base_link to lidar_link in base_link frame
- * - rot_offset: The rotation quaternion from base_link to lidar_link
- * By applying these offsets using this function, we effectively transform the pose from camera_init->body to odom->lidar_link
- * 
- */
-template<typename T>
-void transform_pose(T& in, const std::vector<double>& pos_offset, const std::vector<double>& rot_offset)
+void transform_pose(geometry_msgs::msg::Pose& in, const std::vector<double>& pos_offset, const std::vector<double>& rot_offset)
 {
-    Eigen::Vector3d pos_in(in.pose.position.x, in.pose.position.y, in.pose.position.z);
+    Eigen::Vector3d pos_in(in.position.x, in.position.y, in.position.z);
     Eigen::Quaterniond quat_in(
-        in.pose.orientation.w,
-        in.pose.orientation.x,
-        in.pose.orientation.y,
-        in.pose.orientation.z
+        in.orientation.w,
+        in.orientation.x,
+        in.orientation.y,
+        in.orientation.z
     );
 
     Eigen::Quaterniond quat_offset(
@@ -698,13 +644,13 @@ void transform_pose(T& in, const std::vector<double>& pos_offset, const std::vec
     quat_out.normalize();
     Eigen::Vector3d pos_out = pos_in + quat_in * t_inv;
 
-    in.pose.position.x = pos_out.x();
-    in.pose.position.y = pos_out.y();
-    in.pose.position.z = pos_out.z();
-    in.pose.orientation.w = quat_out.w();
-    in.pose.orientation.x = quat_out.x();
-    in.pose.orientation.y = quat_out.y();
-    in.pose.orientation.z = quat_out.z();
+    in.position.x = pos_out.x();
+    in.position.y = pos_out.y();
+    in.position.z = pos_out.z();
+    in.orientation.w = quat_out.w();
+    in.orientation.x = quat_out.x();
+    in.orientation.y = quat_out.y();
+    in.orientation.z = quat_out.z();
 }
 
 
@@ -727,7 +673,7 @@ void publish_odometry(const rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPt
     odomAftMapped.child_frame_id = lidar_frame;
     odomAftMapped.header.stamp = get_ros_time(lidar_end_time);
     set_posestamp(odomAftMapped.pose);
-    transform_pose(odomAftMapped.pose, lidar_pos, lidar_rot);
+    transform_pose(odomAftMapped.pose.pose, lidar_pos, lidar_rot);
     pubOdomAftMapped->publish(odomAftMapped);
     auto P = kf.get_P();
     for (int i = 0; i < 6; i ++)
@@ -937,12 +883,6 @@ public:
         this->declare_parameter<int>("pcd_save.interval", -1);
         this->declare_parameter<vector<double>>("mapping.extrinsic_T", vector<double>());
         this->declare_parameter<vector<double>>("mapping.extrinsic_R", vector<double>());
-        
-        // Custom frame ID parameters
-        this->declare_parameter<string>("publish.custom_frame_id", "lidar_link");
-        this->declare_parameter<string>("publish.custom_topic_name", "/cloud_custom_frame");
-        this->declare_parameter<bool>("publish.custom_transform_to_world", false);
-        this->declare_parameter<bool>("publish.custom_enable", true);
 
         this->get_parameter_or<bool>("publish.path_en", path_en, true);
         this->get_parameter_or<bool>("publish.effect_map_en", effect_pub_en, false);
@@ -984,19 +924,6 @@ public:
         this->get_parameter_or<int>("pcd_save.interval", pcd_save_interval, -1);
         this->get_parameter_or<vector<double>>("mapping.extrinsic_T", extrinT, vector<double>());
         this->get_parameter_or<vector<double>>("mapping.extrinsic_R", extrinR, vector<double>());
-
-        // Get custom frame parameters
-        string custom_frame_id, custom_topic_name;
-        bool custom_transform_to_world, custom_enable;
-        this->get_parameter_or<string>("publish.custom_frame_id", custom_frame_id, "lidar_link");
-        this->get_parameter_or<string>("publish.custom_topic_name", custom_topic_name, "/cloud_custom_frame");
-        this->get_parameter_or<bool>("publish.custom_transform_to_world", custom_transform_to_world, false);
-        this->get_parameter_or<bool>("publish.custom_enable", custom_enable, true);
-
-        // Store as member variables
-        custom_frame_id_ = custom_frame_id;
-        custom_transform_to_world_ = custom_transform_to_world;
-        custom_enable_ = custom_enable;
 
         RCLCPP_INFO(this->get_logger(), "p_pre->lidar_type %d", p_pre->lidar_type);
 
@@ -1061,12 +988,6 @@ public:
         pubLaserCloudMap_ = this->create_publisher<sensor_msgs::msg::PointCloud2>("/Laser_map", 20);
         pubOdomAftMapped_ = this->create_publisher<nav_msgs::msg::Odometry>("/Odometry", 20);
         pubPath_ = this->create_publisher<nav_msgs::msg::Path>("/path", 20);
-        
-        // Create custom publisher
-        if (custom_enable_) {
-            pubLaserCloudCustom_ = this->create_publisher<sensor_msgs::msg::PointCloud2>(custom_topic_name, 20);
-        }
-        
         tf_broadcaster_ = std::make_unique<tf2_ros::TransformBroadcaster>(*this);
 
         //------------------------------------------------------------------------------------------------------
@@ -1209,11 +1130,6 @@ private:
             if (effect_pub_en) publish_effect_world(pubLaserCloudEffect_);
             // if (map_pub_en) publish_map(pubLaserCloudMap_);
 
-            // Publish custom frame if enabled
-            if (custom_enable_) {
-                publish_frame_custom(pubLaserCloudCustom_, custom_frame_id_, custom_transform_to_world_);
-            }
-
             /*** Debug variables ***/
             if (runtime_pos_log)
             {
@@ -1291,12 +1207,6 @@ private:
 
     FILE *fp;
     ofstream fout_pre, fout_out, fout_dbg;
-
-    // Custom frame parameters
-    string custom_frame_id_;
-    bool custom_transform_to_world_;
-    bool custom_enable_;
-    rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr pubLaserCloudCustom_;
 };
 
 int main(int argc, char** argv)
